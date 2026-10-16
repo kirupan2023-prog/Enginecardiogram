@@ -1,0 +1,6 @@
+{
+  "name": "Automotive Telemetry Dashboard",
+  "description": "A high-fidelity client-side automotive telemetry dashboard supporting USB Web Serial connections and real-time simulator telemetry.",
+  "requestFramePermissions": ["serial", "geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
