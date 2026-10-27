@@ -849,7 +849,138 @@ export default function App() {
     }
   }, []);
 
-  // 3. Accelerometer Collision Crash SOS & Mobile Shake-to-SOS (DeviceMotionEvent with 3-second rapid response)
+  // 2b. Firebase Realtime Database Telemetry Cloud Mirroring (Phone <- Firebase <- Laptop)
+  // Ensure receiving end (mobile phone) listens to vehicle/telemetry and updates local UI state
+  useEffect(() => {
+    try {
+      const telemetryRef = ref(db, 'vehicle/telemetry');
+      const unsubscribe = onValue(
+        telemetryRef,
+        (snapshot) => {
+          const remoteData = snapshot.val();
+          if (!remoteData) return;
+
+          // If this device is actively reading its own local serial port, don't overwrite local serial stream
+          if (connectionStatus === 'connected') return;
+
+          const rawSpeed = typeof remoteData.speed === 'number' ? remoteData.speed : parseFloat(remoteData.speed || 0);
+          const rawRpm = typeof remoteData.rpm === 'number' ? remoteData.rpm : parseFloat(remoteData.rpm || 0);
+          const rawTemp = typeof remoteData.coolantTemp === 'number'
+            ? remoteData.coolantTemp
+            : typeof remoteData.temp === 'number'
+            ? remoteData.temp
+            : parseFloat(remoteData.coolantTemp || remoteData.temp || 0);
+          const rawThrottle = typeof remoteData.throttle === 'number' ? remoteData.throttle : parseFloat(remoteData.throttle ?? 42);
+          const rawLoad = typeof remoteData.load === 'number' ? remoteData.load : parseFloat(remoteData.load ?? 38);
+
+          if (isNaN(rawSpeed) || isNaN(rawRpm) || isNaN(rawTemp)) return;
+
+          const now = new Date(remoteData.timestamp || Date.now());
+          const timeStr = now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+          // Run malfunction evaluation on incoming cloud telemetry so alerts sync across devices
+          evaluateTelemetryMalfunction(rawSpeed, rawTemp, rawThrottle, rawLoad);
+
+          // Update primary telemetry UI state to mirror laptop
+          setTelemetry({
+            rpm: rawRpm,
+            speed: rawSpeed,
+            temp: rawTemp,
+            throttle: rawThrottle,
+            load: rawLoad,
+            gear: 1,
+            timestamp: timeStr,
+            timestampMs: remoteData.timestamp || Date.now()
+          });
+
+          // Update statistics
+          setStats((prev) => {
+            const updateMetric = (current: number | null, val: number, isMin: boolean) => {
+              if (current === null) return val;
+              return isMin ? Math.min(current, val) : Math.max(current, val);
+            };
+
+            return {
+              rpm: {
+                min: updateMetric(prev.rpm.min, rawRpm, true),
+                max: updateMetric(prev.rpm.max, rawRpm, false),
+                sum: prev.rpm.sum + rawRpm,
+                count: prev.rpm.count + 1
+              },
+              speed: {
+                min: updateMetric(prev.speed.min, rawSpeed, true),
+                max: updateMetric(prev.speed.max, rawSpeed, false),
+                sum: prev.speed.sum + rawSpeed,
+                count: prev.speed.count + 1
+              },
+              temp: {
+                min: updateMetric(prev.temp.min, rawTemp, true),
+                max: updateMetric(prev.temp.max, rawTemp, false),
+                sum: prev.temp.sum + rawTemp,
+                count: prev.temp.count + 1
+              },
+              throttle: {
+                min: updateMetric(prev.throttle.min, rawThrottle, true),
+                max: updateMetric(prev.throttle.max, rawThrottle, false),
+                sum: prev.throttle.sum + rawThrottle,
+                count: prev.throttle.count + 1
+              },
+              load: {
+                min: updateMetric(prev.load.min, rawLoad, true),
+                max: updateMetric(prev.load.max, rawLoad, false),
+                sum: prev.load.sum + rawLoad,
+                count: prev.load.count + 1
+              },
+              gear: prev.gear
+            };
+          });
+
+          // Update scrolling timeline history
+          setHistory((prev) => {
+            const nextRpm = [...prev.rpm, rawRpm];
+            const nextSpeed = [...prev.speed, rawSpeed];
+            const nextTemp = [...prev.temp, rawTemp];
+            const nextThrottle = [...prev.throttle, rawThrottle];
+            const nextLoad = [...(prev.load || []), rawLoad];
+            const nextTimestamps = [...prev.timestamps, timeStr];
+
+            const cap = historyCapacityRef.current;
+            if (nextRpm.length > cap) {
+              nextRpm.shift();
+              nextSpeed.shift();
+              nextTemp.shift();
+              nextThrottle.shift();
+              if (nextLoad.length > cap) nextLoad.shift();
+              nextTimestamps.shift();
+            }
+
+            return {
+              rpm: nextRpm,
+              speed: nextSpeed,
+              temp: nextTemp,
+              throttle: nextThrottle,
+              load: nextLoad,
+              gear: prev.gear,
+              timestamps: nextTimestamps
+            };
+          });
+        },
+        (error) => {
+          console.warn('[Firebase RTDB] Telemetry mirroring listener error:', error);
+        }
+      );
+
+      return () => {
+        if (typeof unsubscribe === 'function') {
+          unsubscribe();
+        }
+      };
+    } catch (err) {
+      console.warn('[Firebase RTDB] Telemetry mirroring setup error:', err);
+    }
+  }, [connectionStatus]);
+
+  // 3. Accelerometer Collision Crash SOS & Mobile Shake-to-SOS (DeviceMotionEvent with firm threshold to prevent false triggers)
   useEffect(() => {
     let shakeCount = 0;
     let firstShakeTime = 0;
@@ -881,8 +1012,8 @@ export default function App() {
 
       const now = Date.now();
 
-      // Calculate acceleration changes to detect a vigorous phone shake (threshold > 18 m/s²)
-      if (netForce > 18) {
+      // Increased shake threshold (netForce > 35 m/s²) requiring a firm, deliberate shake and preventing false triggers
+      if (netForce > 35) {
         if (shakeCount === 0 || now - firstShakeTime > 3000) {
           firstShakeTime = now;
           shakeCount = 1;
@@ -899,8 +1030,8 @@ export default function App() {
           console.warn('[Firebase RTDB] Failed to invoke set(ref(db, ...)):', err);
         }
 
-        // Trigger local crash lockdown within 3 seconds when phone is shaken vigorously or experiences sudden collision shock
-        if (netForce > 24 || shakeCount >= 2) {
+        // Trigger local crash lockdown within 3 seconds when phone is firmly shaken (threshold > 38 m/s² or 2 firm shakes)
+        if (netForce > 38 || shakeCount >= 2) {
           triggerVehicleImpactCrash(
             `PHYSICAL COLLISION DETECTED: ACCELEROMETER ACCELERATION ${netForce.toFixed(1)} m/s²`
           );
@@ -1064,10 +1195,10 @@ export default function App() {
 
   // SOS Protocol & Sensor Malfunction Manual Test Triggers for Hardware Bench Testing
   const triggerTestGForce = () => {
-    addLog('Simulating physical accelerometer shock event (> 25 m/s²)...', 'system');
+    addLog('Simulating physical accelerometer shock event (> 35 m/s²)...', 'system');
     const customEvent = new Event('devicemotion') as any;
-    customEvent.acceleration = { x: 18, y: 16, z: 12 };
-    customEvent.accelerationIncludingGravity = { x: 18, y: 16, z: 12 };
+    customEvent.acceleration = { x: 26, y: 24, z: 20 };
+    customEvent.accelerationIncludingGravity = { x: 26, y: 24, z: 20 };
     window.dispatchEvent(customEvent);
   };
 
@@ -1177,6 +1308,7 @@ export default function App() {
   const historyCapacityRef = useRef<number>(100);
   const consoleActiveRef = useRef<boolean>(true);
   const simProfileRef = useRef<any>('cruise');
+  const lastFirebaseTelemetrySyncRef = useRef<number>(0);
   const simStateRef = useRef({
     rpm: 3040,
     speed: 64.0,
@@ -1463,6 +1595,27 @@ export default function App() {
         timestamp: timeStr,
         timestampMs: Date.now()
       });
+
+      // 1. Telemetry Cloud Sync (Laptop -> Firebase Realtime Database -> Phone)
+      // Push parsed telemetry data to Firebase so the mobile phone mirrors it in real-time
+      const nowMs = Date.now();
+      if (nowMs - lastFirebaseTelemetrySyncRef.current >= 120) {
+        lastFirebaseTelemetrySyncRef.current = nowMs;
+        try {
+          set(ref(db, 'vehicle/telemetry'), {
+            speed: rawSpeed,
+            rpm: rawRpm,
+            coolantTemp: rawTemp,
+            throttle: rawThrottle,
+            load: parsedLoad,
+            timestamp: nowMs
+          }).catch((err: any) => {
+            console.warn('[Firebase RTDB] Telemetry push error:', err);
+          });
+        } catch (fbErr) {
+          console.warn('[Firebase RTDB] Telemetry push error:', fbErr);
+        }
+      }
 
       // Add to statistics
       setStats((prev) => {
