@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { db, ref, set, onValue } from './firebase';
 import { 
   Gauge, 
   Compass, 
@@ -118,13 +119,13 @@ export default function App() {
     truckRef.current = activeTruck;
   }, [activeTruck]);
 
-  // Telemetry state
+  // Telemetry state - Baseline undisturbed steady 64 KM/H parameters
   const [telemetry, setTelemetry] = useState<TelemetryData>({
-    rpm: 0,
-    speed: 0,
-    temp: 25,
-    throttle: 0,
-    load: 0,
+    rpm: 3040,
+    speed: 64,
+    temp: 88,
+    throttle: 42,
+    load: 38,
     gear: 1,
     timestamp: '--:--:--',
     timestampMs: 0
@@ -132,23 +133,23 @@ export default function App() {
 
   // Historic rolling buffer state
   const [history, setHistory] = useState<TelemetryHistory>({
-    rpm: [],
-    speed: [],
-    temp: [],
-    throttle: [],
-    load: [],
-    gear: [],
-    timestamps: []
+    rpm: [3040],
+    speed: [64],
+    temp: [88],
+    throttle: [42],
+    load: [38],
+    gear: [1],
+    timestamps: ['--:--:--']
   });
 
   // Session stats tracking
   const [stats, setStats] = useState({
-    rpm: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
-    speed: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
-    temp: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
-    throttle: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
-    load: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
-    gear: { min: null as number | null, max: null as number | null, sum: 0, count: 0 },
+    rpm: { min: 3040, max: 3040, sum: 3040, count: 1 },
+    speed: { min: 64, max: 64, sum: 64, count: 1 },
+    temp: { min: 88, max: 88, sum: 88, count: 1 },
+    throttle: { min: 42, max: 42, sum: 42, count: 1 },
+    load: { min: 38, max: 38, sum: 38, count: 1 },
+    gear: { min: 1, max: 1, sum: 1, count: 1 },
   });
 
   // Settings
@@ -156,9 +157,9 @@ export default function App() {
   const [baudRate, setBaudRate] = useState<number>(115200);
   const [historyCapacity, setHistoryCapacity] = useState<number>(100);
   const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
-  const [speedUnit, setSpeedUnit] = useState<'MPH' | 'KMH'>('MPH');
+  const [speedUnit, setSpeedUnit] = useState<'MPH' | 'KMH'>('KMH');
   const [autoScaleY, setAutoScaleY] = useState<boolean>(false);
-  const [simProfile, setSimProfile] = useState<'track' | 'drag' | 'cruise' | 'overheat'>('track');
+  const [simProfile, setSimProfile] = useState<'track' | 'drag' | 'cruise' | 'overheat'>('cruise');
   const [simHz, setSimHz] = useState<number>(10);
   const [isSimMenuOpen, setIsSimMenuOpen] = useState<boolean>(false);
   const simDropdownRef = useRef<HTMLDivElement>(null);
@@ -285,19 +286,19 @@ export default function App() {
 
     const isMalfunction = typeof causeOrConfig === 'object'
       ? causeOrConfig.mode === 'malfunction'
-      : (causeOrConfig.includes('CRITICAL SYSTEM TELEMETRY MALFUNCTION') || causeOrConfig.includes('MALFUNCTION'));
+      : (causeOrConfig.includes('MALFUNCTION') || causeOrConfig.includes('SAFETY ESCALATION'));
 
     const headline = isMalfunction
-      ? 'CRITICAL SYSTEM TELEMETRY MALFUNCTION DETECTED'
-      : 'VEHICLE IMPACT DETECTED';
+      ? 'EMERGENCY SYSTEM MALFUNCTION'
+      : 'EMERGENCY CRASH SOS';
 
     const subtitle = isMalfunction
       ? 'CONTINUOUS SENSOR ANOMALY EXCEEDED 60s SAFETY THRESHOLD'
-      : 'DISTRIBUTED MQTT CLOUD EMERGENCY PROTOCOL ENGAGED';
+      : 'VEHICLE COLLISION DETECTED • LIVE GPS DISPATCH ACTIVATED';
 
     const cause = typeof causeOrConfig === 'string'
       ? causeOrConfig
-      : (causeOrConfig.cause || (isMalfunction ? 'TELEMETRY SENSOR MALFUNCTION' : 'PHYSICAL IMPACT DETECTED'));
+      : (causeOrConfig.cause || (isMalfunction ? 'TELEMETRY SENSOR MALFUNCTION' : 'PHYSICAL COLLISION DETECTED'));
 
     const sensorLabel = typeof causeOrConfig === 'object' && causeOrConfig.sensorLabel
       ? causeOrConfig.sensorLabel
@@ -446,18 +447,22 @@ export default function App() {
 
             <div style="border-bottom: 1px solid rgba(255, 255, 255, 0.25); padding-bottom: 12px; margin-bottom: 14px;">
               <div style="font-size: 11px; letter-spacing: 2px; color: rgba(255, 255, 255, 0.85); text-transform: uppercase; font-weight: 700;">
-                GPS Coordinates:
+                Live Geolocation Coordinates:
               </div>
               <div style="font-size: clamp(14px, 1.8vw, 17px); font-weight: 800; color: #FFFFFF; margin-top: 4px;">
-                LATITUDE: <span style="color: #FFCC00;">${latStr}</span> &nbsp;|&nbsp; LONGITUDE: <span style="color: #FFCC00;">${lonStr}</span>
+                LATITUDE: <span id="sos-live-lat" style="color: #FFCC00;">${latStr}</span> &nbsp;|&nbsp; LONGITUDE: <span id="sos-live-lon" style="color: #FFCC00;">${lonStr}</span>
               </div>
-              ${(latStr !== 'N/A' && latStr !== 'Acquiring GPS...' && latStr !== 'Unavailable' && latStr !== 'Not Supported') ? `
-                <div style="margin-top: 6px;">
+              <div id="sos-live-maps-link" style="margin-top: 6px;">
+                ${(latStr !== 'N/A' && latStr !== 'Acquiring GPS...' && latStr !== 'Acquiring live GPS fix...' && latStr !== 'Unavailable' && latStr !== 'Not Supported') ? `
                   <a href="https://maps.google.com/?q=${latStr},${lonStr}" target="_blank" rel="noopener noreferrer" style="color: #FFFFFF; font-size: 12px; text-decoration: underline; font-weight: 700;">
                     Open Vehicle Location on Google Maps ↗
                   </a>
-                </div>
-              ` : ''}
+                ` : `
+                  <span style="font-size: 11px; color: rgba(255,255,255,0.85); font-style: italic;">
+                    Fetching browser navigator.geolocation satellite position...
+                  </span>
+                `}
+              </div>
             </div>
 
             <div style="border-bottom: 1px solid rgba(255, 255, 255, 0.25); padding-bottom: 12px; margin-bottom: 14px;">
@@ -505,6 +510,48 @@ export default function App() {
         </div>
       </div>
     `;
+
+    // Automatically fetch live browser geolocation coordinates and update screen
+    if (typeof navigator !== 'undefined' && 'geolocation' in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const latEl = document.getElementById('sos-live-lat');
+          const lonEl = document.getElementById('sos-live-lon');
+          const mapEl = document.getElementById('sos-live-maps-link');
+          const formattedLat = pos.coords.latitude.toFixed(6);
+          const formattedLon = pos.coords.longitude.toFixed(6);
+          if (latEl) latEl.textContent = formattedLat;
+          if (lonEl) lonEl.textContent = formattedLon;
+          if (mapEl) {
+            mapEl.innerHTML = `
+              <a href="https://maps.google.com/?q=${formattedLat},${formattedLon}" target="_blank" rel="noopener noreferrer" style="color: #FFFFFF; font-size: 12px; text-decoration: underline; font-weight: 700;">
+                Open Vehicle Location on Google Maps (${formattedLat}, ${formattedLon}) ↗
+              </a>
+            `;
+          }
+        },
+        (err) => {
+          console.warn('Navigator geolocation request error:', err.message);
+        },
+        { timeout: 6000, enableHighAccuracy: true }
+      );
+    }
+
+    // Wire up Reset button to clear Firebase RTDB vehicle/sos flag and dismiss overlay
+    setTimeout(() => {
+      const resetBtn = document.getElementById('reset-system-btn');
+      if (resetBtn) {
+        resetBtn.addEventListener('click', (e) => {
+          e.preventDefault();
+          try {
+            set(ref(db, 'vehicle/sos'), false).catch(() => {});
+          } catch (_) {}
+          const overlay = document.getElementById('crash-overlay');
+          if (overlay) overlay.remove();
+          crashTriggeredRef.current = false;
+        });
+      }
+    }, 100);
   };
 
   // Cloud MQTT Alert Transmission Helper
@@ -580,18 +627,18 @@ export default function App() {
   };
 
   // 1. Accelerometer-Only Crash Detection Trigger
-  // The full-screen "VEHICLE IMPACT DETECTED" SOS Lockdown must strictly be triggered by mobile accelerometer motion
+  // The full-screen "EMERGENCY CRASH SOS" Lockdown must strictly be triggered by mobile accelerometer motion
   const triggerVehicleImpactCrash = (cause: string) => {
     if (crashTriggeredRef.current) return;
     crashTriggeredRef.current = true;
 
-    addLog(`💥 [ACCELEROMETER IMPACT DETECTED] ${cause} — Launching full-screen VEHICLE IMPACT DETECTED lockdown`, 'system');
+    addLog(`💥 [ACCELEROMETER COLLISION] ${cause} — Launching full-screen EMERGENCY CRASH SOS lockdown`, 'system');
 
     // Trigger full-screen lockdown UI immediately
     lockdownUI({
       mode: 'crash',
       cause: cause
-    }, 'Acquiring GPS...', 'Acquiring GPS...');
+    }, 'Acquiring live GPS fix...', 'Acquiring live GPS fix...');
 
     // Transmit MQTT SOS payload with GPS coordinates to cloud broker
     broadcastEmergencyMqtt('crash', cause);
@@ -769,23 +816,103 @@ export default function App() {
     return false;
   };
 
-  // Accelerometer-Only Motion Listener (DeviceMotionEvent acceleration magnitude > 25 m/s²)
+  // 2. Firebase Realtime Database Cross-Device Synchronization ('vehicle/sos')
   useEffect(() => {
+    try {
+      const sosRef = ref(db, 'vehicle/sos');
+      const unsubscribe = onValue(
+        sosRef,
+        (snapshot) => {
+          const isSosActive = snapshot.val();
+          console.log('[Firebase RTDB] vehicle/sos value:', isSosActive);
+          if (isSosActive === true) {
+            // When the value changes to true, trigger the full-screen Emergency Crash SOS view/state on this device
+            if (!crashTriggeredRef.current) {
+              triggerVehicleImpactCrash(
+                'REMOTE VEHICLE SOS TRIGGERED VIA FIREBASE REALTIME DATABASE'
+              );
+            }
+          }
+        },
+        (error) => {
+          console.warn('[Firebase RTDB] vehicle/sos listener error:', error);
+        }
+      );
+
+      return () => {
+        if (typeof unsubscribe === 'function') {
+          unsubscribe();
+        }
+      };
+    } catch (err) {
+      console.warn('[Firebase RTDB] Initialization error:', err);
+    }
+  }, []);
+
+  // 3. Accelerometer Collision Crash SOS & Mobile Shake-to-SOS (DeviceMotionEvent with 3-second rapid response)
+  useEffect(() => {
+    let shakeCount = 0;
+    let firstShakeTime = 0;
+
+    const requestPermissionIfNeeded = () => {
+      if (typeof (DeviceMotionEvent as any)?.requestPermission === 'function') {
+        (DeviceMotionEvent as any).requestPermission().catch(() => {});
+      }
+    };
+    window.addEventListener('click', requestPermissionIfNeeded, { once: true });
+    window.addEventListener('touchstart', requestPermissionIfNeeded, { once: true });
+
     const handleDeviceMotion = (event: DeviceMotionEvent) => {
-      const acc = event.acceleration || event.accelerationIncludingGravity;
-      if (!acc) return;
-      const x = acc.x || 0;
-      const y = acc.y || 0;
-      const z = acc.z || 0;
-      const totalForce = Math.sqrt(x * x + y * y + z * z);
-      if (totalForce > 25) {
-        triggerVehicleImpactCrash(`PHYSICAL IMPACT DETECTED: ACCELEROMETER ACCELERATION ${totalForce.toFixed(1)} m/s² (> 25 m/s²)`);
+      if (crashTriggeredRef.current) return;
+
+      let netForce = 0;
+      if (event.acceleration && (event.acceleration.x !== null || event.acceleration.y !== null || event.acceleration.z !== null)) {
+        const x = event.acceleration.x || 0;
+        const y = event.acceleration.y || 0;
+        const z = event.acceleration.z || 0;
+        netForce = Math.sqrt(x * x + y * y + z * z);
+      } else if (event.accelerationIncludingGravity) {
+        const x = event.accelerationIncludingGravity.x || 0;
+        const y = event.accelerationIncludingGravity.y || 0;
+        const z = event.accelerationIncludingGravity.z || 0;
+        const total = Math.sqrt(x * x + y * y + z * z);
+        netForce = Math.abs(total - 9.8);
+      }
+
+      const now = Date.now();
+
+      // Calculate acceleration changes to detect a vigorous phone shake (threshold > 18 m/s²)
+      if (netForce > 18) {
+        if (shakeCount === 0 || now - firstShakeTime > 3000) {
+          firstShakeTime = now;
+          shakeCount = 1;
+        } else {
+          shakeCount++;
+        }
+
+        // When a shake exceeds the threshold, write an emergency flag to Firebase: set(ref(db, 'vehicle/sos'), true)
+        try {
+          set(ref(db, 'vehicle/sos'), true).catch((err: any) => {
+            console.warn('[Firebase RTDB] Error setting vehicle/sos:', err);
+          });
+        } catch (err) {
+          console.warn('[Firebase RTDB] Failed to invoke set(ref(db, ...)):', err);
+        }
+
+        // Trigger local crash lockdown within 3 seconds when phone is shaken vigorously or experiences sudden collision shock
+        if (netForce > 24 || shakeCount >= 2) {
+          triggerVehicleImpactCrash(
+            `PHYSICAL COLLISION DETECTED: ACCELEROMETER ACCELERATION ${netForce.toFixed(1)} m/s²`
+          );
+        }
       }
     };
 
-    window.addEventListener('devicemotion', handleDeviceMotion);
+    window.addEventListener('devicemotion', handleDeviceMotion, true);
     return () => {
-      window.removeEventListener('devicemotion', handleDeviceMotion);
+      window.removeEventListener('devicemotion', handleDeviceMotion, true);
+      window.removeEventListener('click', requestPermissionIfNeeded);
+      window.removeEventListener('touchstart', requestPermissionIfNeeded);
     };
   }, []);
 
@@ -972,14 +1099,18 @@ export default function App() {
   };
 
   const triggerClearFault = () => {
-    addLog('Simulating jumper wire removal (Sensor data returned to normal limits)...', 'system');
+    addLog('Simulating jumper wire removal (Sensor data returned to normal baseline limits)...', 'system');
+    try {
+      set(ref(db, 'vehicle/sos'), false).catch(() => {});
+    } catch (_) {}
     if (simStateRef.current) {
       simStateRef.current.temp = 88;
-      simStateRef.current.speed = 55;
-      simStateRef.current.throttle = 35;
-      simStateRef.current.load = 42;
+      simStateRef.current.speed = 64;
+      simStateRef.current.throttle = 42;
+      simStateRef.current.load = 38;
+      simStateRef.current.rpm = 3040;
     }
-    handleParsedLine(`2100,55,88.0,35,42`);
+    handleParsedLine(`3040,64.0,88.0,42,38`);
   };
 
   const triggerFastForward60s = () => {
@@ -1045,12 +1176,13 @@ export default function App() {
   // Refs for tracking mutable state inside non-reactive loops / intervals
   const historyCapacityRef = useRef<number>(100);
   const consoleActiveRef = useRef<boolean>(true);
-  const simProfileRef = useRef<any>('track');
+  const simProfileRef = useRef<any>('cruise');
   const simStateRef = useRef({
-    rpm: 800,
-    speed: 0,
-    temp: 85,
-    throttle: 0,
+    rpm: 3040,
+    speed: 64.0,
+    temp: 88.0,
+    throttle: 42,
+    load: 38,
     gear: 1,
     time: 0,
     shifting: false,
@@ -1096,13 +1228,13 @@ export default function App() {
   useEffect(() => {
     if (connectionStatus === 'simulator') {
       const initialTruck = truckRef.current;
-      // Reset simulator physics state
+      // Reset simulator physics state to baseline undisturbed state
       simStateRef.current = {
-        rpm: 750,
-        speed: 0,
-        temp: 82.0,
-        throttle: 0,
-        load: 15,
+        rpm: 3040,
+        speed: 64.0,
+        temp: 88.0,
+        throttle: 42,
+        load: 38,
         gear: 1,
         time: 0,
         shifting: false,
@@ -1119,15 +1251,14 @@ export default function App() {
         state.time += dt;
 
         if (profile === 'cruise') {
-          // Highway Cruise: smooth, steady 65-72 mph cruising in top gear
-          state.gear = truck.maxGears;
-          state.throttle = 32 + Math.sin(state.time * 0.4) * 6;
-          const targetRpm = Math.min(truck.redlineRpm * 0.42, 1600) + Math.sin(state.time * 0.3) * 50;
+          // Highway Cruise: smooth, steady undisturbed state 64 KM/H (RPM ~3040, Temp ~88°C, Throttle ~42%, Load ~38%)
+          state.throttle = 42 + Math.sin(state.time * 0.4) * 1.5;
+          const targetRpm = 3040 + Math.sin(state.time * 0.3) * 20;
           state.rpm = state.rpm * 0.92 + targetRpm * 0.08;
-          const targetSpeed = (truck.maxSpeedMph * 0.65) + Math.sin(state.time * 0.3) * 3;
+          const targetSpeed = 64.0 + Math.sin(state.time * 0.2) * 0.6;
           state.speed = state.speed * 0.94 + targetSpeed * 0.06;
-          state.temp = 89 + Math.sin(state.time * 0.05) * 2;
-          state.load = 28 + Math.sin(state.time * 0.4) * 6;
+          state.temp = 88.0 + Math.sin(state.time * 0.05) * 0.5;
+          state.load = 38.0 + Math.sin(state.time * 0.4) * 1.5;
         } else if (profile === 'drag') {
           // Drag Strip: 0-100% full throttle launches, upshifts at redline
           const dragTime = state.time % 20;
@@ -1613,7 +1744,7 @@ export default function App() {
 
   const isOverheating = telemetry.temp >= thresholds.tempWarning;
 
-  const dispSpeed = speedUnit === 'KMH' ? Math.round(telemetry.speed * 1.60934) : Math.round(telemetry.speed);
+  const dispSpeed = speedUnit === 'KMH' ? Math.round(telemetry.speed) : Math.round(telemetry.speed * 0.621371);
   const dispTemp = tempUnit === 'F' ? Math.round((telemetry.temp * 9) / 5 + 32) : Math.round(telemetry.temp);
   
   const isRpmAlert = telemetry.rpm >= thresholds.rpmWarning;
@@ -2004,8 +2135,8 @@ export default function App() {
           </button>
         </nav>
 
-        {/* Absolute Bottom: Theme Toggle (Icon-Only, Moon/Sun icon centered) */}
-        <div className="theme-toggle-wrapper pt-3 border-t border-[#e2ece6]/20 mt-auto flex justify-center w-full">
+        {/* Bottom: Theme Toggle (Desktop sidebar bottom, mobile horizontal item) */}
+        <div className="theme-toggle-wrapper pt-0 md:pt-3 border-t-0 md:border-t border-[#e2ece6]/20 mt-0 md:mt-auto flex justify-center items-center w-auto md:w-full shrink-0">
           <button
             id="theme-toggle-btn"
             onClick={toggleTheme}
@@ -2092,6 +2223,21 @@ export default function App() {
             >
               <Download className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">SAVE CSV</span>
+            </button>
+
+            {/* Dedicated Mobile Header Theme Toggle Button */}
+            <button
+              id="mobile-header-theme-toggle"
+              onClick={toggleTheme}
+              className="flex md:hidden items-center justify-center w-7 h-7 text-xs font-mono border-2 border-[#e2ece6]/30 bg-[#0b0f0d] hover:border-[#00FF66] rounded-none cursor-pointer text-[#e2ece6] shrink-0"
+              title={`Switch to ${theme === 'dark' ? 'Light' : 'Dark'} Theme`}
+              aria-label="Toggle Dark / Light Theme"
+            >
+              {theme === 'dark' ? (
+                <Sun className="w-3.5 h-3.5 text-amber-400" />
+              ) : (
+                <Moon className="w-3.5 h-3.5" />
+              )}
             </button>
           </div>
         </header>

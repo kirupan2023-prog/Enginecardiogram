@@ -13,11 +13,11 @@ export default function ArduinoGuide() {
  */
 
 const int THROTTLE_PIN = A0; // Accelerometer or Potentiometer input
-float simulatedRpm = 800.0;
-float simulatedSpeed = 0.0;
-float simulatedTemp = 40.0; // Start cool, warms up
-float simulatedLoad = 20.0;
-bool upshifting = true;
+float simulatedRpm = 3040.0;   // Baseline normal RPM (~3040)
+float simulatedSpeed = 64.0;   // Baseline steady speed (64 KM/H)
+float simulatedTemp = 88.0;    // Baseline normal Temp (~88°C)
+float simulatedLoad = 38.0;    // Baseline normal Load (~38%)
+bool upshifting = false;
 
 void setup() {
   // Start serial communication at 115200 baud (matched with dashboard)
@@ -31,9 +31,9 @@ void loop() {
   int throttleRaw = analogRead(THROTTLE_PIN);
   float throttlePercent = (throttleRaw / 1023.0) * 100.0;
   
-  // If no hardware potentiometer connected, use simulation values:
+  // If no hardware potentiometer connected, use undisturbed baseline values:
   if (throttleRaw < 5) {
-    throttlePercent = 75.0; // Default simulated throttle input
+    throttlePercent = 42.0; // Baseline undisturbed throttle input (42%)
   }
 
   // 2. Compute dynamic, realistic powertrain telemetry

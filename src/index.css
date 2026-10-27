@@ -860,17 +860,42 @@ html.theme-light .stage-canvas-wrapper {
   }
 
   .left-ribbon .theme-toggle-wrapper {
-    padding-top: 0 !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+    padding: 0 !important;
     border-top: none !important;
-    margin-top: 0 !important;
-    border-left: 1px solid rgba(226, 236, 230, 0.2) !important;
-    padding-left: 6px !important;
+    border-left: 1px solid rgba(226, 236, 230, 0.25) !important;
+    margin: 0 !important;
+    margin-left: 4px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
     flex-shrink: 0 !important;
   }
 
   #theme-toggle-btn {
-    width: 44px !important;
-    height: 44px !important;
+    width: 38px !important;
+    height: 38px !important;
+    min-width: 38px !important;
+    min-height: 38px !important;
+    margin: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  #mobile-header-theme-toggle {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  html.theme-light #mobile-header-theme-toggle {
+    background-color: #ffffff !important;
+    border-color: #374151 !important;
+    color: #111827 !important;
   }
 
   .main-stage {
