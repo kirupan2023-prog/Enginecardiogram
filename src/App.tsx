@@ -860,8 +860,9 @@ export default function App() {
           const remoteData = snapshot.val();
           if (!remoteData) return;
 
-          // If this device is actively reading its own local serial port, don't overwrite local serial stream
-          if (connectionStatus === 'connected') return;
+          // If this device is actively reading its own local physical serial port, don't overwrite local serial stream
+          if (portRef.current) return;
+          console.log('[Firebase RTDB RX] Phone received vehicle/telemetry sync:', remoteData);
 
           const rawSpeed = typeof remoteData.speed === 'number' ? remoteData.speed : parseFloat(remoteData.speed || 0);
           const rawRpm = typeof remoteData.rpm === 'number' ? remoteData.rpm : parseFloat(remoteData.rpm || 0);
@@ -1012,8 +1013,8 @@ export default function App() {
 
       const now = Date.now();
 
-      // Increased shake threshold (netForce > 35 m/s²) requiring a firm, deliberate shake and preventing false triggers
-      if (netForce > 35) {
+      // Significantly reduced shake sensitivity (netForce > 80 m/s²) requiring a truly firm shake to prevent false triggers
+      if (netForce > 80) {
         if (shakeCount === 0 || now - firstShakeTime > 3000) {
           firstShakeTime = now;
           shakeCount = 1;
@@ -1021,7 +1022,7 @@ export default function App() {
           shakeCount++;
         }
 
-        // When a shake exceeds the threshold, write an emergency flag to Firebase: set(ref(db, 'vehicle/sos'), true)
+        // When a firm shake exceeds the threshold (80 m/s²), write emergency flag to Firebase: set(ref(db, 'vehicle/sos'), true)
         try {
           set(ref(db, 'vehicle/sos'), true).catch((err: any) => {
             console.warn('[Firebase RTDB] Error setting vehicle/sos:', err);
@@ -1030,8 +1031,8 @@ export default function App() {
           console.warn('[Firebase RTDB] Failed to invoke set(ref(db, ...)):', err);
         }
 
-        // Trigger local crash lockdown within 3 seconds when phone is firmly shaken (threshold > 38 m/s² or 2 firm shakes)
-        if (netForce > 38 || shakeCount >= 2) {
+        // Trigger local crash lockdown within 3 seconds when phone is firmly shaken (threshold >= 85 m/s² or 2 firm shakes)
+        if (netForce >= 85 || shakeCount >= 2) {
           triggerVehicleImpactCrash(
             `PHYSICAL COLLISION DETECTED: ACCELEROMETER ACCELERATION ${netForce.toFixed(1)} m/s²`
           );
@@ -1195,10 +1196,10 @@ export default function App() {
 
   // SOS Protocol & Sensor Malfunction Manual Test Triggers for Hardware Bench Testing
   const triggerTestGForce = () => {
-    addLog('Simulating physical accelerometer shock event (> 35 m/s²)...', 'system');
+    addLog('Simulating physical accelerometer shock event (> 80 m/s²)...', 'system');
     const customEvent = new Event('devicemotion') as any;
-    customEvent.acceleration = { x: 26, y: 24, z: 20 };
-    customEvent.accelerationIncludingGravity = { x: 26, y: 24, z: 20 };
+    customEvent.acceleration = { x: 55, y: 50, z: 40 };
+    customEvent.accelerationIncludingGravity = { x: 55, y: 50, z: 40 };
     window.dispatchEvent(customEvent);
   };
 
@@ -1596,25 +1597,26 @@ export default function App() {
         timestampMs: Date.now()
       });
 
+      const speed = rawSpeed;
+      const rpm = rawRpm;
+      const coolantTemp = rawTemp;
+
       // 1. Telemetry Cloud Sync (Laptop -> Firebase Realtime Database -> Phone)
       // Push parsed telemetry data to Firebase so the mobile phone mirrors it in real-time
-      const nowMs = Date.now();
-      if (nowMs - lastFirebaseTelemetrySyncRef.current >= 120) {
-        lastFirebaseTelemetrySyncRef.current = nowMs;
-        try {
-          set(ref(db, 'vehicle/telemetry'), {
-            speed: rawSpeed,
-            rpm: rawRpm,
-            coolantTemp: rawTemp,
-            throttle: rawThrottle,
-            load: parsedLoad,
-            timestamp: nowMs
-          }).catch((err: any) => {
-            console.warn('[Firebase RTDB] Telemetry push error:', err);
-          });
-        } catch (fbErr) {
-          console.warn('[Firebase RTDB] Telemetry push error:', fbErr);
-        }
+      try {
+        console.log('[Firebase RTDB] Pushing vehicle/telemetry:', { speed, rpm, coolantTemp });
+        set(ref(db, 'vehicle/telemetry'), {
+          speed: speed,
+          rpm: rpm,
+          coolantTemp: coolantTemp,
+          throttle: rawThrottle,
+          load: parsedLoad,
+          timestamp: Date.now()
+        }).catch((err: any) => {
+          console.warn('[Firebase RTDB] Telemetry push error:', err);
+        });
+      } catch (fbErr) {
+        console.warn('[Firebase RTDB] Telemetry push error:', fbErr);
       }
 
       // Add to statistics
