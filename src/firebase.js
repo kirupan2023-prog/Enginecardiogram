@@ -1,7 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getDatabase, ref, set, onValue } from "firebase/database";
 
-// Replace these with your actual Firebase project keys from Step 1
+// Firebase Realtime Database configuration
 const firebaseConfig = {
   apiKey: "AIzaSyCP6LrjDzfoGQZ4rEo43whsb4jlG0antxA",
   authDomain: "enginecardiogram.firebaseapp.com",
@@ -13,6 +13,14 @@ const firebaseConfig = {
   measurementId: "G-D5LQTPG6CQ"
 };
 
-const app = initializeApp(firebaseConfig);
-export const db = getDatabase(app);
-export { ref, set, onValue };
+let app = null;
+let db = null;
+
+try {
+  app = initializeApp(firebaseConfig);
+  db = getDatabase(app);
+} catch (err) {
+  console.warn('[Firebase] Safe initialization notice (app will run locally):', err);
+}
+
+export { db, ref, set, onValue };

@@ -66,6 +66,19 @@ const HISTORY_CAPACITY_OPTIONS = [50, 100, 150, 200, 300];
 
 export type DashboardView = 'dashboard' | 'graphs' | 'telematics' | 'controls';
 
+// Safe Firebase RTDB helper that never throws or crashes if Firebase is unavailable
+const safeFirebaseSet = (path: string, payload: any) => {
+  try {
+    if (!db || typeof ref !== 'function' || typeof set !== 'function') return;
+    const pathRef = ref(db, path);
+    set(pathRef, payload).catch((err: any) => {
+      console.warn(`[Firebase RTDB] Write error on ${path}:`, err?.message || err);
+    });
+  } catch (err: any) {
+    console.warn(`[Firebase RTDB] Invocation error on ${path}:`, err?.message || err);
+  }
+};
+
 export default function App() {
   // Tab Navigation View State: 4 distinct views
   const [activeTab, setActiveTab] = useState<DashboardView>('dashboard');
@@ -154,6 +167,20 @@ export default function App() {
 
   // Settings
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
+  const connectionStatusRef = useRef<ConnectionStatus>('disconnected');
+  const isLiveRemoteRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    connectionStatusRef.current = connectionStatus;
+    if (connectionStatus === 'disconnected' && !isLiveRemoteRef.current) {
+      if (activeMalfunctionRef.current) {
+        activeMalfunctionRef.current = null;
+        setActiveMalfunction(null);
+        setMalfunctionStopwatch('00:00');
+      }
+    }
+  }, [connectionStatus]);
+
   const [baudRate, setBaudRate] = useState<number>(115200);
   const [historyCapacity, setHistoryCapacity] = useState<number>(100);
   const [tempUnit, setTempUnit] = useState<'C' | 'F'>('C');
@@ -310,7 +337,7 @@ export default function App() {
 
     const durationStr = typeof causeOrConfig === 'object' && causeOrConfig.duration
       ? causeOrConfig.duration
-      : '01:00';
+      : '00:10';
 
     const lat = typeof causeOrConfig === 'object' && causeOrConfig.lat !== undefined ? causeOrConfig.lat : latParam;
     const lon = typeof causeOrConfig === 'object' && causeOrConfig.lon !== undefined ? causeOrConfig.lon : lonParam;
@@ -428,10 +455,10 @@ export default function App() {
                   Safety Escalation Status:
                 </div>
                 <div style="font-size: clamp(14px, 1.8vw, 17px); font-weight: 900; color: #FFCC00; margin-top: 4px;">
-                  CONTINUOUS SENSOR ANOMALY EXCEEDED 60s SAFETY THRESHOLD
+                  CONTINUOUS SENSOR ANOMALY EXCEEDED 10s SAFETY THRESHOLD
                 </div>
                 <div style="font-size: 12px; color: #FFFFFF; margin-top: 4px; opacity: 0.9;">
-                  Active Sensor Malfunction Duration: <strong>${durationStr}</strong> (Safety Threshold: 60s)
+                  Active Sensor Malfunction Duration: <strong>${durationStr}</strong> (Safety Threshold: 10s)
                 </div>
               </div>
             ` : `
@@ -543,9 +570,7 @@ export default function App() {
       if (resetBtn) {
         resetBtn.addEventListener('click', (e) => {
           e.preventDefault();
-          try {
-            set(ref(db, 'vehicle/sos'), false).catch(() => {});
-          } catch (_) {}
+          safeFirebaseSet('vehicle/sos', false);
           const overlay = document.getElementById('crash-overlay');
           if (overlay) overlay.remove();
           crashTriggeredRef.current = false;
@@ -649,21 +674,21 @@ export default function App() {
     triggerVehicleImpactCrash(cause);
   };
 
-  // 3. 60-Second Malfunction SOS Escalation Protocol Trigger
-  // If any single sensor malfunction persists continuously for more than 60 seconds (stopwatch reaches 01:00):
+  // 3. 10-Second Malfunction SOS Escalation Protocol Trigger
+  // If any single sensor malfunction persists continuously for more than 10 seconds (stopwatch reaches 00:10):
   // 1. Trigger full-screen Lockdown SOS alert screen.
   // 2. Headline MUST state "CRITICAL SYSTEM TELEMETRY MALFUNCTION DETECTED" (NOT a crash or impact alert).
-  // 3. Display details of specific faulty parameter and state: "CONTINUOUS SENSOR ANOMALY EXCEEDED 60s SAFETY THRESHOLD".
+  // 3. Display details of specific faulty parameter and state: "CONTINUOUS SENSOR ANOMALY EXCEEDED 10s SAFETY THRESHOLD".
   const triggerMalfunctionEscalation = (
     sensorLabel: string,
     details: string,
-    durationStr: string = '01:00'
+    durationStr: string = '00:10'
   ) => {
     if (crashTriggeredRef.current) return;
     crashTriggeredRef.current = true;
 
-    const causeMsg = `${sensorLabel} MALFUNCTION: CONTINUOUS SENSOR ANOMALY EXCEEDED 60s SAFETY THRESHOLD`;
-    addLog(`🚨 [60-SECOND SAFETY ESCALATION] ${causeMsg}`, 'system');
+    const causeMsg = `${sensorLabel} MALFUNCTION: CONTINUOUS SENSOR ANOMALY EXCEEDED 10s SAFETY THRESHOLD`;
+    addLog(`🚨 [10-SECOND SAFETY ESCALATION] ${causeMsg}`, 'system');
 
     lockdownUI({
       mode: 'malfunction',
@@ -677,7 +702,7 @@ export default function App() {
       sensorLabel,
       details,
       duration: durationStr,
-      status: 'CONTINUOUS SENSOR ANOMALY EXCEEDED 60s SAFETY THRESHOLD'
+      status: 'CONTINUOUS SENSOR ANOMALY EXCEEDED 10s SAFETY THRESHOLD'
     });
   };
 
@@ -694,9 +719,21 @@ export default function App() {
     rawSpeed: number,
     rawTemp: number,
     rawThrottle: number,
-    parsedLoad: number
+    parsedLoad: number,
+    forceOrRemote: boolean = false
   ) => {
     if (crashTriggeredRef.current) return;
+
+    // Ensure sensor malfunction timer only starts after a valid USB serial connection or simulation is actively running
+    const isLocalRunning = connectionStatusRef.current === 'connected' || connectionStatusRef.current === 'simulator';
+    if (!isLocalRunning && !forceOrRemote) {
+      if (activeMalfunctionRef.current) {
+        activeMalfunctionRef.current = null;
+        setActiveMalfunction(null);
+        setMalfunctionStopwatch('00:00');
+      }
+      return;
+    }
 
     const speed = isNaN(rawSpeed) ? 0 : rawSpeed;
     const temp = isNaN(rawTemp) ? 0 : rawTemp;
@@ -786,6 +823,14 @@ export default function App() {
   useEffect(() => {
     if (activeMalfunction) {
       const updateStopwatch = () => {
+        const isLocalRunning = connectionStatus === 'connected' || connectionStatus === 'simulator';
+        if (!isLocalRunning && !isLiveRemoteRef.current) {
+          activeMalfunctionRef.current = null;
+          setActiveMalfunction(null);
+          setMalfunctionStopwatch('00:00');
+          return;
+        }
+
         if (!activeMalfunctionRef.current) return;
         const elapsedSec = Math.floor((Date.now() - activeMalfunctionRef.current.startTime) / 1000);
         const mm = String(Math.floor(elapsedSec / 60)).padStart(2, '0');
@@ -793,8 +838,8 @@ export default function App() {
         const formatted = `${mm}:${ss}`;
         setMalfunctionStopwatch(formatted);
 
-        // Check 60-second escalation threshold (stopwatch reaches 01:00)
-        if (elapsedSec >= 60 && !crashTriggeredRef.current) {
+        // Check 10-second escalation threshold (stopwatch reaches 00:10)
+        if (elapsedSec >= 10 && !crashTriggeredRef.current) {
           triggerMalfunctionEscalation(
             activeMalfunctionRef.current.sensorLabel,
             activeMalfunctionRef.current.details,
@@ -809,7 +854,7 @@ export default function App() {
     } else {
       setMalfunctionStopwatch('00:00');
     }
-  }, [activeMalfunction]);
+  }, [activeMalfunction, connectionStatus]);
 
   // Deprecated telemetry crash helper stub (telemetry drops now handled strictly as sensor malfunctions)
   const analyzeTelemetryForCrash = (_rawVehicleSpeedKmh: number | string): boolean => {
@@ -819,19 +864,57 @@ export default function App() {
   // 2. Firebase Realtime Database Cross-Device Synchronization ('vehicle/sos')
   useEffect(() => {
     try {
+      if (!db || typeof ref !== 'function' || typeof onValue !== 'function') {
+        console.warn('[Firebase RTDB] Database not initialized, skipping vehicle/sos listener');
+        return;
+      }
       const sosRef = ref(db, 'vehicle/sos');
+      let isFirstSosSync = true;
+      let lastSosVal: boolean | null = null;
+
       const unsubscribe = onValue(
         sosRef,
         (snapshot) => {
-          const isSosActive = snapshot.val();
-          console.log('[Firebase RTDB] vehicle/sos value:', isSosActive);
-          if (isSosActive === true) {
-            // When the value changes to true, trigger the full-screen Emergency Crash SOS view/state on this device
-            if (!crashTriggeredRef.current) {
-              triggerVehicleImpactCrash(
-                'REMOTE VEHICLE SOS TRIGGERED VIA FIREBASE REALTIME DATABASE'
-              );
+          try {
+            // Guard: ensure snapshot exists and is not null/empty
+            if (!snapshot.exists()) {
+              console.log('[Firebase RTDB] vehicle/sos node does not exist, ignoring');
+              return;
             }
+
+            const rawVal = snapshot.val();
+            const isSosActive = rawVal === true;
+            console.log('[Firebase RTDB] vehicle/sos snapshot received:', rawVal, '(initialSync:', isFirstSosSync, ')');
+
+            // Prevent false SOS on page load:
+            // The initial onValue callback fires immediately with current DB state upon connection.
+            // Do NOT trigger crash lockdown on page load, even if the database held true from an old session.
+            if (isFirstSosSync) {
+              isFirstSosSync = false;
+              lastSosVal = isSosActive;
+              if (isSosActive) {
+                console.log('[Firebase RTDB] Ignoring stale active SOS state on page mount');
+              }
+              return;
+            }
+
+            // Only trigger UI changes when the incoming value is explicitly true and genuinely changes from false/null to true
+            if (isSosActive && lastSosVal !== true) {
+              lastSosVal = true;
+              if (!crashTriggeredRef.current) {
+                triggerVehicleImpactCrash(
+                  'REMOTE VEHICLE SOS TRIGGERED VIA FIREBASE REALTIME DATABASE'
+                );
+              }
+            } else if (!isSosActive) {
+              lastSosVal = false;
+              // If reset remotely to false, dismiss overlay
+              const overlay = document.getElementById('crash-overlay');
+              if (overlay) overlay.remove();
+              crashTriggeredRef.current = false;
+            }
+          } catch (valErr) {
+            console.warn('[Firebase RTDB] snapshot val error:', valErr);
           }
         },
         (error) => {
@@ -853,118 +936,157 @@ export default function App() {
   // Ensure receiving end (mobile phone) listens to vehicle/telemetry and updates local UI state
   useEffect(() => {
     try {
+      if (!db || typeof ref !== 'function' || typeof onValue !== 'function') {
+        return;
+      }
       const telemetryRef = ref(db, 'vehicle/telemetry');
+      let isFirstTelemetrySync = true;
+
       const unsubscribe = onValue(
         telemetryRef,
         (snapshot) => {
-          const remoteData = snapshot.val();
-          if (!remoteData) return;
+          try {
+            // Guard: ensure snapshot exists and has data
+            if (!snapshot.exists()) return;
+            const remoteData = snapshot.val();
+            if (!remoteData || typeof remoteData !== 'object') return;
 
-          // If this device is actively reading its own local physical serial port, don't overwrite local serial stream
-          if (portRef.current) return;
-          console.log('[Firebase RTDB RX] Phone received vehicle/telemetry sync:', remoteData);
+            // If this device is actively reading its own local physical serial port, don't overwrite local serial stream
+            if (portRef.current) return;
 
-          const rawSpeed = typeof remoteData.speed === 'number' ? remoteData.speed : parseFloat(remoteData.speed || 0);
-          const rawRpm = typeof remoteData.rpm === 'number' ? remoteData.rpm : parseFloat(remoteData.rpm || 0);
-          const rawTemp = typeof remoteData.coolantTemp === 'number'
-            ? remoteData.coolantTemp
-            : typeof remoteData.temp === 'number'
-            ? remoteData.temp
-            : parseFloat(remoteData.coolantTemp || remoteData.temp || 0);
-          const rawThrottle = typeof remoteData.throttle === 'number' ? remoteData.throttle : parseFloat(remoteData.throttle ?? 42);
-          const rawLoad = typeof remoteData.load === 'number' ? remoteData.load : parseFloat(remoteData.load ?? 38);
+            const rawSpeed = typeof remoteData.speed === 'number' ? remoteData.speed : parseFloat(remoteData.speed || 0);
+            const rawRpm = typeof remoteData.rpm === 'number' ? remoteData.rpm : parseFloat(remoteData.rpm || 0);
+            const rawTemp = typeof remoteData.coolantTemp === 'number'
+              ? remoteData.coolantTemp
+              : typeof remoteData.temp === 'number'
+              ? remoteData.temp
+              : parseFloat(remoteData.coolantTemp || remoteData.temp || 0);
+            const rawThrottle = typeof remoteData.throttle === 'number' ? remoteData.throttle : parseFloat(remoteData.throttle ?? 42);
+            const rawLoad = typeof remoteData.load === 'number' ? remoteData.load : parseFloat(remoteData.load ?? 38);
 
-          if (isNaN(rawSpeed) || isNaN(rawRpm) || isNaN(rawTemp)) return;
+            if (isNaN(rawSpeed) || isNaN(rawRpm) || isNaN(rawTemp)) return;
 
-          const now = new Date(remoteData.timestamp || Date.now());
-          const timeStr = now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const nowMs = Date.now();
+            const packetTime = typeof remoteData.timestamp === 'number' ? remoteData.timestamp : nowMs;
+            const isFreshStream = (nowMs - packetTime) < 8000;
 
-          // Run malfunction evaluation on incoming cloud telemetry so alerts sync across devices
-          evaluateTelemetryMalfunction(rawSpeed, rawTemp, rawThrottle, rawLoad);
-
-          // Update primary telemetry UI state to mirror laptop
-          setTelemetry({
-            rpm: rawRpm,
-            speed: rawSpeed,
-            temp: rawTemp,
-            throttle: rawThrottle,
-            load: rawLoad,
-            gear: 1,
-            timestamp: timeStr,
-            timestampMs: remoteData.timestamp || Date.now()
-          });
-
-          // Update statistics
-          setStats((prev) => {
-            const updateMetric = (current: number | null, val: number, isMin: boolean) => {
-              if (current === null) return val;
-              return isMin ? Math.min(current, val) : Math.max(current, val);
-            };
-
-            return {
-              rpm: {
-                min: updateMetric(prev.rpm.min, rawRpm, true),
-                max: updateMetric(prev.rpm.max, rawRpm, false),
-                sum: prev.rpm.sum + rawRpm,
-                count: prev.rpm.count + 1
-              },
-              speed: {
-                min: updateMetric(prev.speed.min, rawSpeed, true),
-                max: updateMetric(prev.speed.max, rawSpeed, false),
-                sum: prev.speed.sum + rawSpeed,
-                count: prev.speed.count + 1
-              },
-              temp: {
-                min: updateMetric(prev.temp.min, rawTemp, true),
-                max: updateMetric(prev.temp.max, rawTemp, false),
-                sum: prev.temp.sum + rawTemp,
-                count: prev.temp.count + 1
-              },
-              throttle: {
-                min: updateMetric(prev.throttle.min, rawThrottle, true),
-                max: updateMetric(prev.throttle.max, rawThrottle, false),
-                sum: prev.throttle.sum + rawThrottle,
-                count: prev.throttle.count + 1
-              },
-              load: {
-                min: updateMetric(prev.load.min, rawLoad, true),
-                max: updateMetric(prev.load.max, rawLoad, false),
-                sum: prev.load.sum + rawLoad,
-                count: prev.load.count + 1
-              },
-              gear: prev.gear
-            };
-          });
-
-          // Update scrolling timeline history
-          setHistory((prev) => {
-            const nextRpm = [...prev.rpm, rawRpm];
-            const nextSpeed = [...prev.speed, rawSpeed];
-            const nextTemp = [...prev.temp, rawTemp];
-            const nextThrottle = [...prev.throttle, rawThrottle];
-            const nextLoad = [...(prev.load || []), rawLoad];
-            const nextTimestamps = [...prev.timestamps, timeStr];
-
-            const cap = historyCapacityRef.current;
-            if (nextRpm.length > cap) {
-              nextRpm.shift();
-              nextSpeed.shift();
-              nextTemp.shift();
-              nextThrottle.shift();
-              if (nextLoad.length > cap) nextLoad.shift();
-              nextTimestamps.shift();
+            // Prevent false sensor malfunction triggers on page load:
+            // Initial connection callback should mirror metrics to UI, but NEVER evaluate a malfunction on load
+            if (isFirstTelemetrySync) {
+              isFirstTelemetrySync = false;
+              console.log('[Firebase RTDB RX] Initial telemetry snapshot loaded on mount:', remoteData);
+              const initialTimeStr = new Date(packetTime).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+              setTelemetry({
+                rpm: rawRpm,
+                speed: rawSpeed,
+                temp: rawTemp,
+                throttle: rawThrottle,
+                load: rawLoad,
+                gear: 1,
+                timestamp: initialTimeStr,
+                timestampMs: packetTime
+              });
+              return;
             }
 
-            return {
-              rpm: nextRpm,
-              speed: nextSpeed,
-              temp: nextTemp,
-              throttle: nextThrottle,
-              load: nextLoad,
-              gear: prev.gear,
-              timestamps: nextTimestamps
-            };
-          });
+            console.log('[Firebase RTDB RX] Phone received vehicle/telemetry sync:', remoteData);
+
+            // Only run malfunction evaluation when a genuine live stream is actively transmitting
+            if (isFreshStream) {
+              isLiveRemoteRef.current = true;
+              evaluateTelemetryMalfunction(rawSpeed, rawTemp, rawThrottle, rawLoad, true);
+            } else {
+              isLiveRemoteRef.current = false;
+            }
+
+            const timeStr = new Date(packetTime).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            // Update primary telemetry UI state to mirror laptop
+            setTelemetry({
+              rpm: rawRpm,
+              speed: rawSpeed,
+              temp: rawTemp,
+              throttle: rawThrottle,
+              load: rawLoad,
+              gear: 1,
+              timestamp: timeStr,
+              timestampMs: packetTime
+            });
+
+            // Update statistics
+            setStats((prev) => {
+              const updateMetric = (current: number | null, val: number, isMin: boolean) => {
+                if (current === null) return val;
+                return isMin ? Math.min(current, val) : Math.max(current, val);
+              };
+
+              return {
+                rpm: {
+                  min: updateMetric(prev.rpm.min, rawRpm, true),
+                  max: updateMetric(prev.rpm.max, rawRpm, false),
+                  sum: prev.rpm.sum + rawRpm,
+                  count: prev.rpm.count + 1
+                },
+                speed: {
+                  min: updateMetric(prev.speed.min, rawSpeed, true),
+                  max: updateMetric(prev.speed.max, rawSpeed, false),
+                  sum: prev.speed.sum + rawSpeed,
+                  count: prev.speed.count + 1
+                },
+                temp: {
+                  min: updateMetric(prev.temp.min, rawTemp, true),
+                  max: updateMetric(prev.temp.max, rawTemp, false),
+                  sum: prev.temp.sum + rawTemp,
+                  count: prev.temp.count + 1
+                },
+                throttle: {
+                  min: updateMetric(prev.throttle.min, rawThrottle, true),
+                  max: updateMetric(prev.throttle.max, rawThrottle, false),
+                  sum: prev.throttle.sum + rawThrottle,
+                  count: prev.throttle.count + 1
+                },
+                load: {
+                  min: updateMetric(prev.load.min, rawLoad, true),
+                  max: updateMetric(prev.load.max, rawLoad, false),
+                  sum: prev.load.sum + rawLoad,
+                  count: prev.load.count + 1
+                },
+                gear: prev.gear
+              };
+            });
+
+            // Update scrolling timeline history
+            setHistory((prev) => {
+              const nextRpm = [...prev.rpm, rawRpm];
+              const nextSpeed = [...prev.speed, rawSpeed];
+              const nextTemp = [...prev.temp, rawTemp];
+              const nextThrottle = [...prev.throttle, rawThrottle];
+              const nextLoad = [...(prev.load || []), rawLoad];
+              const nextTimestamps = [...prev.timestamps, timeStr];
+
+              const cap = historyCapacityRef.current;
+              if (nextRpm.length > cap) {
+                nextRpm.shift();
+                nextSpeed.shift();
+                nextTemp.shift();
+                nextThrottle.shift();
+                if (nextLoad.length > cap) nextLoad.shift();
+                nextTimestamps.shift();
+              }
+
+              return {
+                rpm: nextRpm,
+                speed: nextSpeed,
+                temp: nextTemp,
+                throttle: nextThrottle,
+                load: nextLoad,
+                gear: prev.gear,
+                timestamps: nextTimestamps
+              };
+            });
+          } catch (rxErr) {
+            console.warn('[Firebase RTDB] Error handling telemetry snapshot:', rxErr);
+          }
         },
         (error) => {
           console.warn('[Firebase RTDB] Telemetry mirroring listener error:', error);
@@ -1013,8 +1135,8 @@ export default function App() {
 
       const now = Date.now();
 
-      // Significantly reduced shake sensitivity (netForce > 80 m/s²) requiring a truly firm shake to prevent false triggers
-      if (netForce > 80) {
+      // Significantly reduced shake sensitivity (netForce > 100 m/s²) requiring a very deliberate, heavy shake to completely eliminate accidental triggers
+      if (netForce > 100) {
         if (shakeCount === 0 || now - firstShakeTime > 3000) {
           firstShakeTime = now;
           shakeCount = 1;
@@ -1022,17 +1144,11 @@ export default function App() {
           shakeCount++;
         }
 
-        // When a firm shake exceeds the threshold (80 m/s²), write emergency flag to Firebase: set(ref(db, 'vehicle/sos'), true)
-        try {
-          set(ref(db, 'vehicle/sos'), true).catch((err: any) => {
-            console.warn('[Firebase RTDB] Error setting vehicle/sos:', err);
-          });
-        } catch (err) {
-          console.warn('[Firebase RTDB] Failed to invoke set(ref(db, ...)):', err);
-        }
+        // When a heavy deliberate shake exceeds threshold (100 m/s²), write emergency flag to Firebase
+        safeFirebaseSet('vehicle/sos', true);
 
-        // Trigger local crash lockdown within 3 seconds when phone is firmly shaken (threshold >= 85 m/s² or 2 firm shakes)
-        if (netForce >= 85 || shakeCount >= 2) {
+        // Trigger local crash lockdown within 3 seconds when phone is heavily shaken (threshold >= 100 m/s² or 2 heavy shakes)
+        if (netForce >= 100 || shakeCount >= 2) {
           triggerVehicleImpactCrash(
             `PHYSICAL COLLISION DETECTED: ACCELEROMETER ACCELERATION ${netForce.toFixed(1)} m/s²`
           );
@@ -1053,6 +1169,7 @@ export default function App() {
     let isMounted = true;
     let pollInterval: any = null;
     let fallbackTimeout: any = null;
+    let activeClient: any = null;
 
     const setupMqtt = (brokerIndex = 0) => {
       const mqttLib = (window as any).mqtt || mqtt;
@@ -1087,12 +1204,34 @@ export default function App() {
           reconnectPeriod: 0, // Prevent uncontrolled WebSocket reconnect loops before initial connect succeeds
           keepalive: 60
         });
+        activeClient = client;
+
+        // Permanent safety error listener to guarantee no unhandled error events bubble to global scope
+        client.on('error', (err: any) => {
+          console.warn('[MQTT Handled Broker Error]', err?.message || err);
+          if (!isMounted) return;
+          if (timeoutId) clearTimeout(timeoutId);
+          if (!connectedOnce) {
+            tryNextBroker(err?.message || 'handshake error');
+          } else {
+            setMqttStatus('error');
+          }
+        });
 
         const tryNextBroker = (reason: string) => {
           if (hasAdvanced || connectedOnce || !isMounted) return;
           hasAdvanced = true;
+          if (timeoutId) clearTimeout(timeoutId);
+
           try {
+            // Cancel internal connack timer in mqtt.js if present
+            if ((client as any)?._connackTimer) {
+              clearTimeout((client as any)._connackTimer);
+              (client as any)._connackTimer = null;
+            }
+            // Remove listeners but keep a catch-all error handler so late connack timeouts don't throw uncaught
             client.removeAllListeners();
+            client.on('error', () => {});
             client.end(true);
           } catch (_) {}
 
@@ -1152,20 +1291,10 @@ export default function App() {
           }
         });
 
-        client.on('error', (err: any) => {
-          if (!isMounted) return;
-          clearTimeout(timeoutId);
-          if (!connectedOnce) {
-            tryNextBroker(err?.message || 'handshake error');
-          } else {
-            setMqttStatus('error');
-          }
-        });
-
         client.on('close', () => {
           if (!isMounted) return;
           if (!connectedOnce) {
-            clearTimeout(timeoutId);
+            if (timeoutId) clearTimeout(timeoutId);
             tryNextBroker('socket closed before connect');
           } else {
             setMqttStatus('disconnected');
@@ -1185,10 +1314,16 @@ export default function App() {
       isMounted = false;
       if (pollInterval) clearTimeout(pollInterval);
       if (fallbackTimeout) clearTimeout(fallbackTimeout);
-      if (mqttClientRef.current) {
+      const c = activeClient || mqttClientRef.current;
+      if (c) {
         try {
-          mqttClientRef.current.removeAllListeners();
-          mqttClientRef.current.end(true);
+          if (c._connackTimer) {
+            clearTimeout(c._connackTimer);
+            c._connackTimer = null;
+          }
+          c.removeAllListeners();
+          c.on('error', () => {});
+          c.end(true);
         } catch (_) {}
       }
     };
@@ -1196,10 +1331,10 @@ export default function App() {
 
   // SOS Protocol & Sensor Malfunction Manual Test Triggers for Hardware Bench Testing
   const triggerTestGForce = () => {
-    addLog('Simulating physical accelerometer shock event (> 80 m/s²)...', 'system');
+    addLog('Simulating physical accelerometer shock event (> 100 m/s²)...', 'system');
     const customEvent = new Event('devicemotion') as any;
-    customEvent.acceleration = { x: 55, y: 50, z: 40 };
-    customEvent.accelerationIncludingGravity = { x: 55, y: 50, z: 40 };
+    customEvent.acceleration = { x: 65, y: 60, z: 50 };
+    customEvent.accelerationIncludingGravity = { x: 65, y: 60, z: 50 };
     window.dispatchEvent(customEvent);
   };
 
@@ -1232,9 +1367,7 @@ export default function App() {
 
   const triggerClearFault = () => {
     addLog('Simulating jumper wire removal (Sensor data returned to normal baseline limits)...', 'system');
-    try {
-      set(ref(db, 'vehicle/sos'), false).catch(() => {});
-    } catch (_) {}
+    safeFirebaseSet('vehicle/sos', false);
     if (simStateRef.current) {
       simStateRef.current.temp = 88;
       simStateRef.current.speed = 64;
@@ -1246,16 +1379,16 @@ export default function App() {
   };
 
   const triggerFastForward60s = () => {
-    addLog('Fast-forwarding active sensor anomaly stopwatch to 60s escalation threshold...', 'system');
+    addLog('Fast-forwarding active sensor anomaly stopwatch to 10s escalation threshold...', 'system');
     if (!activeMalfunctionRef.current) {
       triggerTestTempAnomaly();
     }
     if (activeMalfunctionRef.current) {
-      activeMalfunctionRef.current.startTime = Date.now() - 61000;
+      activeMalfunctionRef.current.startTime = Date.now() - 11000;
       triggerMalfunctionEscalation(
         activeMalfunctionRef.current.sensorLabel,
         activeMalfunctionRef.current.details,
-        '01:00'
+        '00:10'
       );
     }
   };
@@ -1553,33 +1686,40 @@ export default function App() {
         return;
       }
 
-      const rawRpm = parseFloat(values[0]);
-      const rawSpeed = parseFloat(values[1]);
-      const rawTemp = parseFloat(values[2]);
+      const rpm = parseFloat(values[0]);
+      const speed = parseFloat(values[1]);
+      const coolantTemp = parseFloat(values[2]);
       const rawThrottle = parseFloat(values[3]);
       const rawLoad = parseFloat(values[4]);
 
       // Guard against non-numeric payloads
-      if (isNaN(rawRpm) || isNaN(rawSpeed) || isNaN(rawTemp) || isNaN(rawThrottle) || isNaN(rawLoad)) {
+      if (isNaN(rpm) || isNaN(speed) || isNaN(coolantTemp) || isNaN(rawThrottle) || isNaN(rawLoad)) {
         return;
       }
+
+      // 1. Immediately inside parsing loop, broadcast live telemetry to Firebase Realtime Database
+      safeFirebaseSet('vehicle/telemetry', {
+        speed: speed,
+        rpm: rpm,
+        coolantTemp: coolantTemp,
+        timestamp: Date.now()
+      });
 
       const parsedLoad = Math.min(100, Math.max(0, rawLoad));
 
       // Evaluate Web Serial telemetry for out-of-bounds sensor anomalies
       // (Vehicle Speed 0 with Load > 20%, Coolant Temp >= 120°C, Throttle < 0% or > 100%, Engine Load >= 98%)
-      evaluateTelemetryMalfunction(rawSpeed, rawTemp, rawThrottle, parsedLoad);
+      evaluateTelemetryMalfunction(speed, coolantTemp, rawThrottle, parsedLoad);
 
       const now = new Date();
       const timeStr = now.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-      // 2. Note: ALL DOM queries and updates for "Gear Position" or gear elements have been removed.
       // Record raw telemetry data to uncapped dataLogRef
       dataLogRef.current.push({
         timestamp: timeStr,
-        rpm: rawRpm,
-        speed: rawSpeed,
-        temp: rawTemp,
+        rpm: rpm,
+        speed: speed,
+        temp: coolantTemp,
         throttle: rawThrottle,
         load: parsedLoad,
         gear: 1
@@ -1587,9 +1727,9 @@ export default function App() {
 
       // Update real-time state
       setTelemetry({
-        rpm: rawRpm,
-        speed: rawSpeed,
-        temp: rawTemp,
+        rpm: rpm,
+        speed: speed,
+        temp: coolantTemp,
         throttle: rawThrottle,
         load: parsedLoad,
         gear: 1,
@@ -1597,27 +1737,9 @@ export default function App() {
         timestampMs: Date.now()
       });
 
-      const speed = rawSpeed;
-      const rpm = rawRpm;
-      const coolantTemp = rawTemp;
-
-      // 1. Telemetry Cloud Sync (Laptop -> Firebase Realtime Database -> Phone)
-      // Push parsed telemetry data to Firebase so the mobile phone mirrors it in real-time
-      try {
-        console.log('[Firebase RTDB] Pushing vehicle/telemetry:', { speed, rpm, coolantTemp });
-        set(ref(db, 'vehicle/telemetry'), {
-          speed: speed,
-          rpm: rpm,
-          coolantTemp: coolantTemp,
-          throttle: rawThrottle,
-          load: parsedLoad,
-          timestamp: Date.now()
-        }).catch((err: any) => {
-          console.warn('[Firebase RTDB] Telemetry push error:', err);
-        });
-      } catch (fbErr) {
-        console.warn('[Firebase RTDB] Telemetry push error:', fbErr);
-      }
+      const rawRpm = rpm;
+      const rawSpeed = speed;
+      const rawTemp = coolantTemp;
 
       // Add to statistics
       setStats((prev) => {
@@ -2417,7 +2539,7 @@ export default function App() {
                     {activeMalfunction.headline}
                   </div>
                   <p className="text-[10px] sm:text-[11px] font-mono font-bold opacity-90 uppercase">
-                    {activeMalfunction.details} • 60-SECOND SAFETY ESCALATION MONITORING ACTIVE
+                    {activeMalfunction.details} • 10-SECOND SAFETY ESCALATION MONITORING ACTIVE
                   </p>
                 </div>
               </div>
@@ -2431,7 +2553,7 @@ export default function App() {
                     {malfunctionStopwatch}
                   </span>
                   <span className="text-[10px] font-bold opacity-60">
-                    / 01:00
+                    / 00:10
                   </span>
                 </div>
               </div>
@@ -3139,7 +3261,7 @@ export default function App() {
                 </span>
               </div>
               <p className="text-[10px] font-mono text-[#e2ece6] mt-0.5 truncate sm:whitespace-normal">
-                Impact: Accelerometer &gt; 25 m/s² • Sensor Malfunctions: Temp ≥ 120°C, Spd 0 (Load&gt;20), Throttle, Load (60s Escalate) • MQTT: <code className="text-[#FF0000] font-black">ecg/fleet/truck04/sos</code>
+                Impact: Accelerometer &gt; 100 m/s² • Sensor Malfunctions: Temp ≥ 120°C, Spd 0 (Load&gt;20), Throttle, Load (10s Escalate) • MQTT: <code className="text-[#FF0000] font-black">ecg/fleet/truck04/sos</code>
               </p>
             </div>
           </div>
@@ -3150,9 +3272,9 @@ export default function App() {
             <button
               onClick={triggerTestGForce}
               className="btn-test-sos flex-1 sm:flex-initial px-2 py-1 text-[10px] font-mono uppercase tracking-wider border-2 border-[#FF0000] bg-[#0b0f0d] text-[#FF0000] hover:bg-[#FF0000] hover:text-white transition-all rounded-none cursor-pointer font-black text-center"
-              title="Simulates devicemotion accelerometer shock event > 25 m/s² (Triggers VEHICLE IMPACT DETECTED)"
+              title="Simulates devicemotion accelerometer shock event > 100 m/s² (Triggers VEHICLE IMPACT DETECTED)"
             >
-              💥 Shock &gt; 25
+              💥 Shock &gt; 100
             </button>
             <button
               onClick={triggerTestTempAnomaly}
@@ -3178,9 +3300,9 @@ export default function App() {
             <button
               onClick={triggerFastForward60s}
               className="btn-test-sos flex-1 sm:flex-initial px-2 py-1 text-[10px] font-mono uppercase tracking-wider border-2 border-[#FF0000] bg-[#0b0f0d] text-[#FF0000] hover:bg-[#FF0000] hover:text-white transition-all rounded-none cursor-pointer font-black text-center"
-              title="Fast-forwards active stopwatch to 60s escalation threshold (Triggers CRITICAL SYSTEM TELEMETRY MALFUNCTION DETECTED)"
+              title="Fast-forwards active stopwatch to 10s escalation threshold (Triggers CRITICAL SYSTEM TELEMETRY MALFUNCTION DETECTED)"
             >
-              ⚡ 60s Escalate
+              ⚡ 10s Escalate
             </button>
             <button
               onClick={triggerTestCloudMqtt}
