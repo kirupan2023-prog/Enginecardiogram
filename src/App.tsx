@@ -132,54 +132,75 @@ export default function App() {
     truckRef.current = activeTruck;
   }, [activeTruck]);
 
-  // Telemetry state - Baseline undisturbed steady 64 KM/H parameters
+  // Telemetry state - Defaults to 0 when disconnected / unlinked
   const [telemetry, setTelemetry] = useState<TelemetryData>({
-    rpm: 3040,
-    speed: 64,
-    temp: 88,
-    throttle: 42,
-    load: 38,
-    gear: 1,
+    rpm: 0,
+    speed: 0,
+    temp: 0,
+    coolantTemp: 0,
+    throttle: 0,
+    load: 0,
+    gear: 0,
     timestamp: '--:--:--',
     timestampMs: 0
   });
 
   // Historic rolling buffer state
   const [history, setHistory] = useState<TelemetryHistory>({
-    rpm: [3040],
-    speed: [64],
-    temp: [88],
-    throttle: [42],
-    load: [38],
-    gear: [1],
+    rpm: [0],
+    speed: [0],
+    temp: [0],
+    throttle: [0],
+    load: [0],
+    gear: [0],
     timestamps: ['--:--:--']
   });
 
   // Session stats tracking
   const [stats, setStats] = useState({
-    rpm: { min: 3040, max: 3040, sum: 3040, count: 1 },
-    speed: { min: 64, max: 64, sum: 64, count: 1 },
-    temp: { min: 88, max: 88, sum: 88, count: 1 },
-    throttle: { min: 42, max: 42, sum: 42, count: 1 },
-    load: { min: 38, max: 38, sum: 38, count: 1 },
-    gear: { min: 1, max: 1, sum: 1, count: 1 },
+    rpm: { min: null, max: null, sum: 0, count: 0 },
+    speed: { min: null, max: null, sum: 0, count: 0 },
+    temp: { min: null, max: null, sum: 0, count: 0 },
+    throttle: { min: null, max: null, sum: 0, count: 0 },
+    load: { min: null, max: null, sum: 0, count: 0 },
+    gear: { min: null, max: null, sum: 0, count: 0 },
   });
 
-  // Settings
+  // Settings & Connection Status
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const connectionStatusRef = useRef<ConnectionStatus>('disconnected');
   const isLiveRemoteRef = useRef<boolean>(false);
 
+  // Connection and Simulator active state
+  const isConnected = connectionStatus === 'connected';
+  const isSimulator = connectionStatus === 'simulator';
+
+  // Whenever isConnected is false and the simulator mode is inactive,
+  // all telemetry state variables (speed, rpm, coolantTemp, throttle, load) automatically default to 0
+  // instead of holding onto stale data when disconnected.
   useEffect(() => {
     connectionStatusRef.current = connectionStatus;
-    if (connectionStatus === 'disconnected' && !isLiveRemoteRef.current) {
+    if (!isConnected && !isSimulator) {
+      if (!isLiveRemoteRef.current) {
+        setTelemetry({
+          rpm: 0,
+          speed: 0,
+          temp: 0,
+          coolantTemp: 0,
+          throttle: 0,
+          load: 0,
+          gear: 0,
+          timestamp: '--:--:--',
+          timestampMs: 0
+        });
+      }
       if (activeMalfunctionRef.current) {
         activeMalfunctionRef.current = null;
         setActiveMalfunction(null);
         setMalfunctionStopwatch('00:00');
       }
     }
-  }, [connectionStatus]);
+  }, [connectionStatus, isConnected, isSimulator]);
 
   const [baudRate, setBaudRate] = useState<number>(115200);
   const [historyCapacity, setHistoryCapacity] = useState<number>(100);
@@ -980,6 +1001,7 @@ export default function App() {
                 rpm: rawRpm,
                 speed: rawSpeed,
                 temp: rawTemp,
+                coolantTemp: rawTemp,
                 throttle: rawThrottle,
                 load: rawLoad,
                 gear: 1,
@@ -1006,6 +1028,7 @@ export default function App() {
               rpm: rawRpm,
               speed: rawSpeed,
               temp: rawTemp,
+              coolantTemp: rawTemp,
               throttle: rawThrottle,
               load: rawLoad,
               gear: 1,
@@ -1224,10 +1247,18 @@ export default function App() {
           if (timeoutId) clearTimeout(timeoutId);
 
           try {
-            // Cancel internal connack timer in mqtt.js if present
+            // Cancel internal timers in mqtt.js if present
+            if ((client as any)?.connackTimer) {
+              clearTimeout((client as any).connackTimer);
+              (client as any).connackTimer = null;
+            }
             if ((client as any)?._connackTimer) {
               clearTimeout((client as any)._connackTimer);
               (client as any)._connackTimer = null;
+            }
+            if ((client as any)?._connectTimer) {
+              clearTimeout((client as any)._connectTimer);
+              (client as any)._connectTimer = null;
             }
             // Remove listeners but keep a catch-all error handler so late connack timeouts don't throw uncaught
             client.removeAllListeners();
@@ -1317,9 +1348,17 @@ export default function App() {
       const c = activeClient || mqttClientRef.current;
       if (c) {
         try {
+          if (c.connackTimer) {
+            clearTimeout(c.connackTimer);
+            c.connackTimer = null;
+          }
           if (c._connackTimer) {
             clearTimeout(c._connackTimer);
             c._connackTimer = null;
+          }
+          if (c._connectTimer) {
+            clearTimeout(c._connectTimer);
+            c._connectTimer = null;
           }
           c.removeAllListeners();
           c.on('error', () => {});
@@ -1730,6 +1769,7 @@ export default function App() {
         rpm: rpm,
         speed: speed,
         temp: coolantTemp,
+        coolantTemp: coolantTemp,
         throttle: rawThrottle,
         load: parsedLoad,
         gear: 1,
@@ -1931,6 +1971,18 @@ export default function App() {
     }
 
     setConnectionStatus('disconnected');
+    // Ensure all telemetry state variables default to 0 on disconnect
+    setTelemetry({
+      rpm: 0,
+      speed: 0,
+      temp: 0,
+      coolantTemp: 0,
+      throttle: 0,
+      load: 0,
+      gear: 0,
+      timestamp: '--:--:--',
+      timestampMs: 0
+    });
     addLog('Serial connection severed. Controller disconnected.');
   };
 
@@ -1938,6 +1990,18 @@ export default function App() {
   const handleToggleSimulator = () => {
     if (connectionStatus === 'simulator') {
       setConnectionStatus('disconnected');
+      // Ensure all telemetry state variables default to 0 when simulator is stopped
+      setTelemetry({
+        rpm: 0,
+        speed: 0,
+        temp: 0,
+        coolantTemp: 0,
+        throttle: 0,
+        load: 0,
+        gear: 0,
+        timestamp: '--:--:--',
+        timestampMs: 0
+      });
       addLog('Simulator telemetry stopped.');
     } else {
       // Disconnect active hardware first
@@ -2022,7 +2086,10 @@ export default function App() {
   const isOverheating = telemetry.temp >= thresholds.tempWarning;
 
   const dispSpeed = speedUnit === 'KMH' ? Math.round(telemetry.speed) : Math.round(telemetry.speed * 0.621371);
-  const dispTemp = tempUnit === 'F' ? Math.round((telemetry.temp * 9) / 5 + 32) : Math.round(telemetry.temp);
+  const rawTempVal = telemetry.coolantTemp !== undefined ? telemetry.coolantTemp : telemetry.temp;
+  const dispTemp = (!isConnected && !isSimulator && !isLiveRemoteRef.current)
+    ? 0
+    : (tempUnit === 'F' ? Math.round((rawTempVal * 9) / 5 + 32) : Math.round(rawTempVal));
   
   const isRpmAlert = telemetry.rpm >= thresholds.rpmWarning;
   const isSpeedAlert = speedUnit === 'KMH' ? dispSpeed >= 120 : dispSpeed >= 75;
@@ -2032,6 +2099,7 @@ export default function App() {
 
   // Helper to fetch live parameter configuration & rolling data for each of the 5 telemetry channels
   const getMetricConfig = (mKey: 'rpm' | 'speed' | 'temp' | 'throttle' | 'load') => {
+    const isStreamActive = isConnected || isSimulator;
     switch (mKey) {
       case 'rpm':
         return {
@@ -2041,9 +2109,9 @@ export default function App() {
           unit: 'RPM',
           minY: 0,
           maxY: activeTruck.chartMaxRpm,
-          alert: isRpmAlert,
+          alert: Boolean(isStreamActive && isRpmAlert),
           alertThreshold: activeTruck.rpmWarning,
-          currentValue: `${Math.round(telemetry.rpm)} RPM`,
+          currentValue: `${isStreamActive ? Math.round(telemetry.rpm) : 0} RPM`,
           color: isRpmAlert ? '#FF0000' : (theme === 'light' ? '#006622' : '#00FF66')
         };
       case 'speed':
@@ -2054,9 +2122,9 @@ export default function App() {
           unit: speedUnit,
           minY: 0,
           maxY: speedUnit === 'KMH' ? activeTruck.maxSpeedKmh : activeTruck.maxSpeedMph,
-          alert: isSpeedAlert,
+          alert: Boolean(isStreamActive && isSpeedAlert),
           alertThreshold: speedUnit === 'KMH' ? activeTruck.maxSpeedKmh : activeTruck.maxSpeedMph,
-          currentValue: `${dispSpeed} ${speedUnit}`,
+          currentValue: `${isStreamActive ? dispSpeed : 0} ${speedUnit}`,
           color: isSpeedAlert ? '#FF0000' : (theme === 'light' ? '#006622' : '#00FF66')
         };
       case 'temp':
@@ -2067,9 +2135,9 @@ export default function App() {
           unit: `°${tempUnit}`,
           minY: tempUnit === 'F' ? 32 : 0,
           maxY: tempUnit === 'F' ? 266 : 130,
-          alert: isTempAlert,
+          alert: Boolean(isStreamActive && isTempAlert),
           alertThreshold: tempUnit === 'F' ? 203 : thresholds.tempWarning,
-          currentValue: `${dispTemp} °${tempUnit}`,
+          currentValue: `${isStreamActive ? dispTemp : 0} °${tempUnit}`,
           color: isTempAlert ? '#FF0000' : (theme === 'light' ? '#006622' : '#00FF66')
         };
       case 'throttle':
@@ -2080,9 +2148,9 @@ export default function App() {
           unit: '%',
           minY: 0,
           maxY: 100,
-          alert: isThrottleAlert,
+          alert: Boolean(isStreamActive && isThrottleAlert),
           alertThreshold: 85,
-          currentValue: `${Math.round(telemetry.throttle)}%`,
+          currentValue: `${isStreamActive ? Math.round(telemetry.throttle) : 0}%`,
           color: isThrottleAlert ? '#FF0000' : (theme === 'light' ? '#006622' : '#00FF66')
         };
       case 'load':
@@ -2093,9 +2161,9 @@ export default function App() {
           unit: '%',
           minY: 0,
           maxY: 100,
-          alert: isLoadAlert,
+          alert: Boolean(isStreamActive && isLoadAlert),
           alertThreshold: 85,
-          currentValue: `${Math.round(telemetry.load)}%`,
+          currentValue: `${isStreamActive ? Math.round(telemetry.load) : 0}%`,
           color: isLoadAlert ? '#FF0000' : (theme === 'light' ? '#006622' : '#00FF66')
         };
     }
@@ -3015,11 +3083,11 @@ export default function App() {
           <DigitalCard
             id="card-engine-speed"
             label="ENGINE SPEED"
-            value={Math.round(telemetry.rpm)}
+            value={isConnected ? Math.round(telemetry.rpm) : (isSimulator ? Math.round(telemetry.rpm) : 0)}
             min={0}
             max={activeTruck.redlineRpm}
             unit="RPM"
-            alert={isRpmAlert}
+            alert={Boolean((isConnected || isSimulator) && isRpmAlert)}
             alertThreshold={activeTruck.rpmWarning}
             onClick={() => handleSelectMetric('rpm')}
             isSelected={selectedDashboardMetric === 'rpm'}
@@ -3030,11 +3098,11 @@ export default function App() {
           <DigitalCard
             id="card-vehicle-speed"
             label="VEHICLE SPEED"
-            value={dispSpeed}
+            value={isConnected ? dispSpeed : (isSimulator ? dispSpeed : 0)}
             min={0}
             max={speedUnit === 'KMH' ? activeTruck.maxSpeedKmh : activeTruck.maxSpeedMph}
             unit={speedUnit}
-            alert={isSpeedAlert}
+            alert={Boolean((isConnected || isSimulator) && isSpeedAlert)}
             alertThreshold={speedUnit === 'KMH' ? activeTruck.maxSpeedKmh : activeTruck.maxSpeedMph}
             onClick={() => handleSelectMetric('speed')}
             isSelected={selectedDashboardMetric === 'speed'}
@@ -3045,11 +3113,11 @@ export default function App() {
           <DigitalCard
             id="card-coolant-temp"
             label="COOLANT TEMP"
-            value={dispTemp}
+            value={isConnected ? dispTemp : (isSimulator ? dispTemp : 0)}
             min={tempUnit === 'F' ? 32 : 0}
             max={tempUnit === 'F' ? 266 : 130}
             unit={`°${tempUnit}`}
-            alert={isTempAlert}
+            alert={Boolean((isConnected || isSimulator) && isTempAlert)}
             alertThreshold={tempUnit === 'F' ? 203 : thresholds.tempWarning}
             onClick={() => handleSelectMetric('temp')}
             isSelected={selectedDashboardMetric === 'temp'}
@@ -3060,11 +3128,11 @@ export default function App() {
           <DigitalCard
             id="card-throttle-pos"
             label="THROTTLE POS"
-            value={Math.round(telemetry.throttle)}
+            value={isConnected ? Math.round(telemetry.throttle) : (isSimulator ? Math.round(telemetry.throttle) : 0)}
             min={0}
             max={100}
             unit="%"
-            alert={isThrottleAlert}
+            alert={Boolean((isConnected || isSimulator) && isThrottleAlert)}
             alertThreshold={85}
             onClick={() => handleSelectMetric('throttle')}
             isSelected={selectedDashboardMetric === 'throttle'}
@@ -3075,11 +3143,11 @@ export default function App() {
           <DigitalCard
             id="card-engine-load"
             label="ENGINE LOAD"
-            value={Math.round(telemetry.load)}
+            value={isConnected ? Math.round(telemetry.load) : (isSimulator ? Math.round(telemetry.load) : 0)}
             min={0}
             max={100}
             unit="%"
-            alert={isLoadAlert}
+            alert={Boolean((isConnected || isSimulator) && isLoadAlert)}
             alertThreshold={85}
             onClick={() => handleSelectMetric('load')}
             isSelected={selectedDashboardMetric === 'load'}

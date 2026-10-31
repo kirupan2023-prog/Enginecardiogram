@@ -7,6 +7,7 @@ export interface TelemetryData {
   gear: number;      // Gear (0 - 10, where 0 is Neutral)
   timestamp: string; // Formatting HH:mm:ss
   timestampMs: number;
+  coolantTemp?: number; // Coolant / Engine Temp
 }
 
 export interface MetricThresholds {

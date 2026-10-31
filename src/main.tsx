@@ -3,25 +3,67 @@ import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
 import './index.css';
 
-// Handle non-fatal network/connack timeouts from third-party MQTT brokers
+// Intercept non-fatal network/connack/undefined errors from third-party MQTT brokers and resource loading
 if (typeof window !== 'undefined') {
-  window.addEventListener('error', (event) => {
-    const msg = event?.message || event?.error?.message || '';
-    if (typeof msg === 'string' && (msg.includes('connack timeout') || msg.includes('CONNACK'))) {
+  window.addEventListener('error', (event: any) => {
+    // If event is a resource loading error or has undefined/empty error message
+    if (!event.error && !event.message) {
       event.preventDefault();
       event.stopImmediatePropagation();
-      console.warn('[Handled non-fatal error] MQTT connack timeout intercepted:', msg);
       return true;
+    }
+    const msg = String(event?.message || event?.error?.message || event?.error || '');
+    if (
+      msg === 'undefined' ||
+      msg === '' ||
+      msg.includes('connack timeout') ||
+      msg.includes('CONNACK') ||
+      msg.includes('WebSocket') ||
+      msg.includes('Script error')
+    ) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      console.warn('[Handled non-fatal error intercepted]:', msg || 'unspecified error event');
+      return true;
+    }
+  }, true);
+
+  window.addEventListener('unhandledrejection', (event: any) => {
+    if (!event.reason || event.reason === 'undefined') {
+      event.preventDefault();
+      return;
+    }
+    const reasonMsg = String(event?.reason?.message || event?.reason || '');
+    if (
+      reasonMsg === 'undefined' ||
+      reasonMsg === '' ||
+      reasonMsg.includes('connack timeout') ||
+      reasonMsg.includes('CONNACK') ||
+      reasonMsg.includes('WebSocket')
+    ) {
+      event.preventDefault();
+      console.warn('[Handled non-fatal rejection intercepted]:', reasonMsg);
     }
   });
 
-  window.addEventListener('unhandledrejection', (event) => {
-    const reasonMsg = event?.reason?.message || String(event?.reason || '');
-    if (typeof reasonMsg === 'string' && (reasonMsg.includes('connack timeout') || reasonMsg.includes('CONNACK'))) {
-      event.preventDefault();
-      console.warn('[Handled non-fatal rejection] MQTT connack timeout intercepted:', reasonMsg);
+  const prevOnError = window.onerror;
+  window.onerror = function (msg, source, lineno, colno, error) {
+    const strMsg = String(msg || error?.message || '');
+    if (
+      !msg ||
+      strMsg === 'undefined' ||
+      strMsg === '' ||
+      strMsg.includes('connack timeout') ||
+      strMsg.includes('CONNACK') ||
+      strMsg.includes('WebSocket')
+    ) {
+      return true;
     }
-  });
+    if (typeof prevOnError === 'function') {
+      return prevOnError(msg, source, lineno, colno, error);
+    }
+    return false;
+  };
 }
 
 createRoot(document.getElementById('root')!).render(
